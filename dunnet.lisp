@@ -30,6 +30,46 @@
 ;;;; All globals which can change must be saved from 'save-game.  Add
 ;;;; all new globals to bottom of this section.
 
+#+sbcl (declaim (sb-ext:muffle-conditions style-warning))
+
+(defmacro while (pred &rest body)
+  `(loop while ,pred
+      do ,@body))
+
+(defmacro match (valform &rest clauses)
+  (labels ((expand-match-clauses (valsym clauses)
+             (if (not clauses)
+                 '#'(lambda () nil)
+                 (destructuring-bind ((lambda-list . body) . rest) clauses
+                   (cond
+                     ((null lambda-list)
+                      `(if (null ,valsym)
+                           #'(lambda () ,@body)
+                           ,(expand-match-clauses valsym rest)))
+                     ((symbolp lambda-list)
+                      `(let ((,lambda-list ,valsym))
+                         #'(lambda () ,@body)))
+                     ((consp lambda-list)
+                      `(handler-case
+                           (destructuring-bind ,lambda-list ,valsym
+                             #'(lambda () ,@body))
+                         (condition ()
+                           ,(expand-match-clauses valsym rest)))))))))
+    (let ((valsym (gensym "val-")))
+      `(let ((,valsym ,valform))
+         (funcall ,(expand-match-clauses valsym clauses))))))
+
+;; based on SO post: 15393797
+(defun split-string (str delimiters)
+  (labels ((delim-p (char)
+             (member char delimiters)))
+    (loop for start = (position-if-not #'delim-p str)
+       then (position-if-not #'delim-p str :start (1+ end))
+       for end = (and start (position-if #'delim-p str :start start))
+       when start
+       collect (subseq str start end)
+       while end)))
+
 (defvar dun-visited '(27))
 (defvar dun-current-room 1)
 (defvar dun-exitf nil)
@@ -49,15 +89,23 @@
 (defvar dun-endgame-question nil)
 (defvar dun-logged-in nil)
 (defvar dungeon-mode 'dungeon)
-(defvar dun-unix-verbs '((ls . dun-ls) (ftp . dun-ftp) (echo . dun-echo)
-                         (exit . dun-uexit) (cd . dun-cd) (pwd . dun-pwd)
-                         (rlogin . dun-rlogin) (ssh . dun-rlogin)
-                         (uncompress . dun-uncompress) (cat . dun-cat)))
 
-(defvar dun-dos-verbs '((dir . dun-dos-dir) (type . dun-dos-type)
-                        (exit . dun-dos-exit) (command . dun-dos-spawn)
-                        (|b:| . dun-dos-invd) (|c:| . dun-dos-invd)
-                        (|a:| . dun-dos-nil)))
+(defconstant dun-unix-verbs
+  '((ls . dun-ls) (ftp . dun-ftp) ;; (echo . dun-echo)
+    (exit . dun-uexit) (cd . dun-cd) (pwd . dun-pwd)
+    (rlogin . dun-rlogin) (ssh . dun-rlogin)
+    (uncompress . dun-uncompress) (cat . dun-cat)))
+
+(defconstant dun-ftp-verbs
+  '((type . dun-ftptype) (binary . dun-bin) (bin . dun-bin)
+    (send . dun-send) (put . dun-send) (quit . dun-ftpquit)
+    (help . dun-ftphelp) (ascii . dun-fascii)))
+
+(defconstant dun-dos-verbs
+  '((dir . dun-dos-dir) (type . dun-dos-type)
+    (exit . dun-dos-exit) (command . dun-dos-spawn)
+    (|B:| . dun-dos-invd) (|C:| . dun-dos-invd)
+    (|A:| . dun-dos-nil)))
 
 (defvar dun-cdpath "/usr/toukmond")
 (defvar dun-cdroom -10)
@@ -622,7 +670,7 @@ A hole leads north."
 
 (defvar dun-inbus nil)
 (defvar dun-nomail nil)
-(defconstant dun-ignore '(the to at))
+(defconstant ignored-words '(the to at))
 (defvar dun-mode 'moby)
 (defvar dun-sauna-level 0)
 
@@ -818,6 +866,29 @@ A hole leads north."
  (subway . -28) (train . -28)
  (pc . -29) (drive . -29) (coconut . -30) (coconuts . -30)
  (lake . -32) (water . -32))
+
+(defun obj->num (obj)
+  (cdr (assoc obj dun-objnames)))
+
+(defun dun-objnum-from-args-std (args)
+  (match args
+         (() (format t "You must supply an object.~%"))
+         ((obj . rest)
+          (let ((objnum (obj->num obj)))
+            (if objnum
+                objnum
+                (format t "I don't know what that is.~%"))))))
+
+(defun obj-in-inventory-p (obj)
+  (if (symbolp obj)
+      (obj-in-inventory-p (obj->num obj))
+      (member obj dun-inventory :test #'eql)))
+
+(defun obj-in-room-p (obj &optional (room dun-current-room))
+  (if (symbolp obj)
+      (obj-in-room-p (obj->num obj) room)
+      (or (member obj (nth room dun-room-objects) :test #'eql)
+          (member obj (nth room dun-room-silents) :test #'eql))))
 
 (defconstant obj-special 255)
 
@@ -1085,7 +1156,7 @@ it.  It is very big, though."
 (defmacro add-room-short-bindings ()
   `(progn
      ,@(loop for name in dun-room-shorts
-          for a from 1
+          for a from 0
           collect `(defvar ,(intern (string-upcase name)) ,a))))
 (add-room-short-bindings)
 
@@ -1117,45 +1188,26 @@ treasures for points?" "4" "four")
 
 (defconstant dun-combination (format nil "~A" (+ 100 (random 899))))
 
-(defmacro while (pred &rest body)
-  `(loop while ,pred
-      do ,@body))
-
-;; based on SO post: 15393797
-(defun split-string (str delimiters)
-  (labels ((delim-p (char)
-             (member char delimiters)))
-    (loop for start = (position-if-not #'delim-p str)
-       then (position-if-not #'delim-p str :start (1+ end))
-       for end = (and start (position-if #'delim-p str :start start))
-       when start
-       collect (subseq str start end)
-       while end)))
-
-(defun dun-listify-string (str)
-  (split-string (string-downcase str) '(#\SPACE #\, #\: #\;)))
-
-(defun dun-listify-string2 (str)
-  (split-string (string-downcase str) '(#\SPACE)))
-
 ;; TODO: This is only an approximation of the original behavior
 (defun dun-get-path (dirstring startlist)
   (append startlist (split-string dirstring '(#\/))))
 
-(defvar dun-line nil)
-(defvar dun-line-list nil)
-
-(defun dun-mprinc (&rest args)
-  (format t "~{~A~}" args))
-
 (defun dun-mprincl (&rest args)
   (format t "~{~A~}~%" args))
 
-(defun dun-read-line ()
-  (read-line))
-
 (defun dun-replace (list n number)
   (rplaca (nthcdr n list) number))
+
+(defun input (&optional prompt-string)
+  (when prompt-string
+    (princ prompt-string)
+    (force-output))
+  (read-line))
+
+(defun input-list (&optional prompt-string (delimiters '(#\SPACE #\, #\: #\;)))
+  (mapcar #'(lambda (str)
+              (intern (string-upcase str)))
+          (split-string (input prompt-string) delimiters)))
 
 ;;;;
 ;;;; This section contains all of the verbs and commands.
@@ -1166,20 +1218,19 @@ treasures for points?" "4" "four")
 
 (defun dun-describe-room (room)
   (if (and (not (member (abs room) dun-light-rooms :test #'eql))
-           (not (member obj-lamp dun-inventory :test #'eql))
-           (not (member obj-lamp (nth dun-current-room dun-room-objects)
-                        :test #'eql)))
+           (not (obj-in-inventory-p 'lamp))
+           (not (obj-in-room-p 'lamp)))
       (dun-mprincl "It is pitch dark.  You are likely to be eaten by a grue.")
       (progn
         (dun-mprincl (cadr (nth (abs room) dun-rooms)))
         (if (and (and (or (member room dun-visited :test #'eql)
-                          (string= dun-mode "dun-superb"))
+                          (eq dun-mode 'dun-superb))
                       (> room 0))
-                 (not (string= dun-mode "long")))
+                 (not (eq dun-mode 'long)))
             nil
             (dun-mprincl (car (nth (abs room) dun-rooms))))
-        (when (and (not (string= dun-mode "long"))
-                   (not (member (abs room) dun-visited)))
+        (when (and (not (eq dun-mode 'long))
+                   (not (member (abs room) dun-visited :test #'eql)))
           (setq dun-visited (append (list (abs room)) dun-visited)))
         (dolist (xobjs (nth dun-current-room dun-room-objects))
           (cond
@@ -1193,8 +1244,8 @@ treasures for points?" "4" "four")
             (dun-mprincl "The jar contains:")
             (dolist (x dun-jar)
               (dun-mprincl "     " (car (nth x dun-objects))))))
-        (if (and (member obj-bus (nth dun-current-room dun-room-objects)) dun-inbus)
-            (dun-mprincl "You are on the bus.")))))
+        (when (and (obj-in-room-p 'bus) dun-inbus)
+          (dun-mprincl "You are on the bus.")))))
 
 ;;; There is a special object in the room.  This object's description,
 ;;; or lack thereof, depends on certain conditions.
@@ -1208,7 +1259,7 @@ treasures for points?" "4" "four")
          (dun-mprincl "The panel lights are steady and motionless.")))
 
     ((and (= dun-current-room red-room)
-          (not (member obj-towel (nth red-room dun-room-objects))))
+          (not (obj-in-room-p 'towel)))
      (dun-mprincl "There is a hole in the floor here."))
 
     ((and (= dun-current-room marine-life-area) dun-black)
@@ -1233,19 +1284,18 @@ your objects, to give off an eerie glow."))
            (dun-mprincl dun-endgame-question))))
 
     ((= dun-current-room sauna)
-     (dun-mprincl (nth dun-sauna-level '(
-                                         "It is normal room temperature in here."
-                                         "It is luke warm in here."
-                                         "It is comfortably hot in here."
-                                         "It is refreshingly hot in here."
-                                         "You are dead now.")))
+     (dun-mprincl (nth dun-sauna-level
+                       '("It is normal room temperature in here."
+                         "It is luke warm in here."
+                         "It is comfortably hot in here."
+                         "It is refreshingly hot in here."
+                         "You are dead now.")))
      (when (= dun-sauna-level 3)
-       (when (or (member obj-rms dun-inventory)
-                 (member obj-rms (nth dun-current-room dun-room-objects)))
+       (when (or (obj-in-inventory-p 'rms) (obj-in-room-p 'rms))
          (dun-mprincl
           "You notice the wax on your statuette beginning to melt, until it completely
 melts off.  You are left with a beautiful diamond!")
-         (if (member obj-rms dun-inventory)
+         (if (obj-in-inventory-p 'rms)
              (progn
                (dun-remove-obj-from-inven obj-rms)
                (setq dun-inventory (append dun-inventory
@@ -1255,8 +1305,7 @@ melts off.  You are left with a beautiful diamond!")
                (dun-replace dun-room-objects dun-current-room
                             (append (nth dun-current-room dun-room-objects)
                                     (list obj-diamond))))))
-       (when (or (member obj-floppy dun-inventory)
-                 (member obj-floppy (nth dun-current-room dun-room-objects)))
+       (when (or (obj-in-inventory-p 'floppy) (obj-in-room-p 'floppy))
          (dun-mprincl
           "You notice your floppy disk beginning to melt.  As you grab for it, the
 disk bursts into flames, and disintegrates.")
@@ -1289,17 +1338,16 @@ disk bursts into flames, and disintegrates.")
         (dolist (x dun-jar)
           (dun-mprincl "     " (cadr (nth x dun-objects))))))))
 
-(defun dun-shake (obj)
-  (let ((objnum (dun-objnum-from-args-std obj)))
+(defun dun-shake (args)
+  (let ((objnum (dun-objnum-from-args-std args)))
     (when objnum
       (cond
-        ((member objnum dun-inventory :test #'eql)
-         ;; If shaking anything will do anything, put here.
-         (dun-mprinc "Shaking " (string-downcase (cadr (nth objnum dun-objects))))
-         (dun-mprincl " seems to have no effect."))
-        ((and (not (member objnum (nth dun-current-room dun-room-silents)))
-              (not (member objnum (nth dun-current-room dun-room-objects))))
-         (dun-mprincl "I don't see that here."))
+        ((obj-in-inventory-p objnum)
+         ;; Shaking does nothing in dunnet
+         (format t "Shaking the ~(~A~) seems to have no effect.~%"
+                 (car args)))
+        ((not (obj-in-room-p objnum))
+         (format t "I don't see that here.~%"))
         ;; Shaking trees can be deadly
         ((= objnum obj-tree)
          (dun-mprinc
@@ -1314,12 +1362,12 @@ on your head.")
         ((< objnum 0) (dun-mprincl "You cannot shake that."))
         (t (dun-mprincl "You don't have that."))))))
 
-(defun dun-drop (obj)
+(defun dun-drop (args)
   (if dun-inbus
       (dun-mprincl "You can't drop anything while on the bus.")
-      (let ((objnum (dun-objnum-from-args-std obj)))
+      (let ((objnum (dun-objnum-from-args-std args)))
         (when objnum
-          (if (not (member objnum dun-inventory :test #'eql))
+          (if (not (obj-in-inventory-p objnum))
               (dun-mprincl "You don't have that.")
               (progn
                 (dun-remove-obj-from-inven objnum)
@@ -1335,102 +1383,88 @@ on your head.")
 
 (defun dun-drop-check (objnum)
   (cond
-   ((and (= objnum obj-food) (= dun-room bear-hangout)
-         (member obj-bear (nth bear-hangout dun-room-objects)))
-    (dun-mprincl
-"The bear takes the food and runs away with it. He left something behind.")
-    (dun-remove-obj-from-room dun-current-room obj-bear)
-    (dun-remove-obj-from-room dun-current-room obj-food)
-    (dun-replace dun-room-objects dun-current-room
-                 (append (nth dun-current-room dun-room-objects)
-                         (list obj-key))))
+    ((and (= objnum obj-food) (= dun-room bear-hangout)
+          (obj-in-room-p 'bear))
+     (dun-mprincl
+      "The bear takes the food and runs away with it. He left something behind.")
+     (dun-remove-obj-from-room dun-current-room obj-bear)
+     (dun-remove-obj-from-room dun-current-room obj-food)
+     (dun-replace dun-room-objects dun-current-room
+                  (append (nth dun-current-room dun-room-objects)
+                          (list obj-key))))
 
-   ((and (= objnum obj-jar) (member obj-nitric dun-jar)
-         (member obj-glycerine dun-jar))
-    (dun-mprincl "As the jar impacts the ground it explodes into many pieces.")
-    (setq dun-jar nil)
-    (dun-remove-obj-from-room dun-current-room obj-jar)
-    (when (= dun-current-room fourth-vermont-intersection)
-      (setq dun-hole t)
-      (setq dun-current-room vermont-station)
-      (dun-mprincl
-"The explosion causes a hole to open up in the ground, which you fall
+    ((and (= objnum obj-jar)
+          (member obj-nitric dun-jar :test #'eql)
+          (member obj-glycerine dun-jar :test #'eql))
+     (dun-mprincl "As the jar impacts the ground it explodes into many pieces.")
+     (setq dun-jar nil)
+     (dun-remove-obj-from-room dun-current-room obj-jar)
+     (when (= dun-current-room fourth-vermont-intersection)
+       (setq dun-hole t)
+       (setq dun-current-room vermont-station)
+       (dun-mprincl
+        "The explosion causes a hole to open up in the ground, which you fall
 through.")))
 
-   ((and (= objnum obj-weight) (= dun-current-room maze-button-room))
-    (dun-mprincl "A passageway opens."))))
+    ((and (= objnum obj-weight) (= dun-current-room maze-button-room))
+     (dun-mprincl "A passageway opens."))))
 
 ;;; Give long description of current room, or an object.
 
-(defun dun-examine (obj)
-  (let ((objnum (dun-objnum-from-args obj)))
-    (cond
-      ((eq objnum obj-special)
-       (dun-describe-room (* dun-current-room -1)))
-      ((and (eq objnum obj-computer)
-            (member obj-pc (nth dun-current-room dun-room-silents)))
-       (dun-examine '("pc")))
-      ((null objnum)
-       (dun-mprincl "I don't know what that is."))
-      ((and (not (member objnum (nth dun-current-room dun-room-objects)))
-            (not (and (member obj-jar dun-inventory)
-                      (member objnum dun-jar)))
-            (not (member objnum (nth dun-current-room dun-room-silents)))
-            (not (member objnum dun-inventory)))
-       (dun-mprincl "I don't see that here."))
-      ((>= objnum 0)
-       (if (and (= objnum obj-bone)
-                (= dun-current-room marine-life-area) dun-black)
-           (dun-mprincl
-            "In this light you can see some writing on the bone.  It says:
+(defun dun-examine (args)
+  (match args
+         (() (dun-describe-room (* dun-current-room -1)))
+         ((obj . rest)
+          (let ((objnum (obj->num obj)))
+            (cond
+              ((and (eq objnum obj-computer)
+                    (member obj-pc (nth dun-current-room dun-room-silents)))
+               (dun-examine '(pc)))
+              ((null objnum)
+               (dun-mprincl "I don't know what that is."))
+              ((and (not (member objnum (nth dun-current-room dun-room-objects)))
+                    (not (and (member obj-jar dun-inventory)
+                              (member objnum dun-jar)))
+                    (not (member objnum (nth dun-current-room dun-room-silents)))
+                    (not (member objnum dun-inventory)))
+               (dun-mprincl "I don't see that here."))
+              ((>= objnum 0)
+               (if (and (= objnum obj-bone)
+                        (= dun-current-room marine-life-area) dun-black)
+                   (dun-mprincl
+                    "In this light you can see some writing on the bone.  It says:
 For an explosive time, go to Fourth St. and Vermont.")
-           (if (nth objnum dun-physobj-desc)
-               (dun-mprincl (nth objnum dun-physobj-desc))
-               (dun-mprincl "I see nothing special about that."))))
-      ((nth (abs objnum) dun-permobj-desc)
-       (dun-mprincl (nth (abs objnum) dun-permobj-desc)))
-      (t (dun-mprincl "I see nothing special about that.")))))
+                   (if (nth objnum dun-physobj-desc)
+                       (dun-mprincl (nth objnum dun-physobj-desc))
+                       (dun-mprincl "I see nothing special about that."))))
+              ((nth (abs objnum) dun-permobj-desc)
+               (dun-mprincl (nth (abs objnum) dun-permobj-desc)))
+              (t (dun-mprincl "I see nothing special about that.")))))))
 
-;;; Get the first non-ignored word from a list.
-
-(defun dun-firstword (list)
-  (when (car list)
-    (while (and list (member (intern (string-upcase (car list))) dun-ignore))
-      (setq list (cdr list)))
-    (car list)))
-
-(defun dun-firstwordl (list)
-  (when (car list)
-    (while (and list (member (intern (string-upcase (car list))) dun-ignore))
-      (setq list (cdr list)))
-    list))
-
-(defun dun-take (obj)
-  (setq obj (dun-firstword obj))
-  (if (not obj)
-      (dun-mprincl "You must supply an object.")
-      (if (string= obj "all")
-          (let ((gotsome nil))
-            (if dun-inbus
-                (dun-mprincl "You can't take anything while on the bus.")
-                (progn
-                  (dolist (x (nth dun-current-room dun-room-objects))
-                    (when (and (>= x 0) (not (= x obj-special)))
-                      (setq gotsome t)
-                      (dun-mprinc (cadr (nth x dun-objects)) ": ")
-                      (dun-take-object x)))
-                  (when (not gotsome)
-                    (dun-mprincl "Nothing to take.")))))
-          (let (objnum)
-            (setq objnum (cdr (assoc (intern (string-upcase obj))
-                                     dun-objnames)))
-            (if (null objnum)
-                (dun-mprincl "I don't know what that is.")
-                (if (and dun-inbus
-                         (not (and (member objnum dun-jar :test #'eql)
-                                   (member obj-jar dun-inventory :test #'eql))))
+(defun dun-take (args)
+  (match args
+         (() (format t "You must supply an object.~%"))
+         ((obj . rest)
+          (if (eq obj 'all)
+              (let ((gotsome nil))
+                (if dun-inbus
                     (dun-mprincl "You can't take anything while on the bus.")
-                    (dun-take-object objnum)))))))
+                    (progn
+                      (dolist (x (nth dun-current-room dun-room-objects))
+                        (when (and (>= x 0) (not (= x obj-special)))
+                          (setq gotsome t)
+                          (format t "~A: " (cadr (nth x dun-objects)))
+                          (dun-take-object x)))
+                      (when (not gotsome)
+                        (dun-mprincl "Nothing to take.")))))
+              (let ((objnum (obj->num obj)))
+                (if (null objnum)
+                    (dun-mprincl "I don't know what that is.")
+                    (if (and dun-inbus
+                             (not (and (member objnum dun-jar :test #'eql)
+                                       (member obj-jar dun-inventory :test #'eql))))
+                        (dun-mprincl "You can't take anything while on the bus.")
+                        (dun-take-object objnum))))))))
 
 (defun dun-take-object (objnum)
   (cond
@@ -1445,17 +1479,17 @@ For an explosive time, go to Fourth St. and Vermont.")
        (setq dun-inventory (append dun-inventory (list objnum)))))
     (t (if (not (member objnum (nth dun-current-room dun-room-objects)))
            (if (not (member objnum (nth dun-current-room dun-room-silents)))
-               (dun-mprinc "I do not see that here.")
+               (format t "I do not see that here.")
                (dun-try-take objnum))
            (if (>= objnum 0)
                (progn
                  (if (and (car dun-inventory)
                           (> (+ (dun-inven-weight) (nth objnum dun-object-lbs)) 11))
-                     (dun-mprinc "Your load would be too heavy.")
+                     (format t "Your load would be too heavy.")
                      (progn
                        (setq dun-inventory (append dun-inventory (list objnum)))
                        (dun-remove-obj-from-room dun-current-room objnum)
-                       (dun-mprinc "Taken.  ")
+                       (format t "Taken.  ")
                        (when (and (= objnum obj-towel)
                                   (= dun-current-room red-room))
                          (dun-mprinc
@@ -1474,13 +1508,13 @@ For an explosive time, go to Fourth St. and Vermont.")
 
 (defun dun-try-take (_obj)
   (declare (ignore _obj))
-  (dun-mprinc "You cannot take that."))
+  (format t "You cannot take that."))
 
 (defun dun-dig (_args)
   (declare (ignore _args))
   (cond
     (dun-inbus (dun-mprincl "Digging here reveals nothing."))
-    ((not (member 0 dun-inventory))
+    ((not (obj-in-inventory-p 'shovel))
      (dun-mprincl "You have nothing with which to dig."))
     ((not (nth dun-current-room dun-diggables))
      (dun-mprincl "Digging here reveals nothing."))
@@ -1490,79 +1524,36 @@ For an explosive time, go to Fourth St. and Vermont.")
                             (nth dun-current-room dun-diggables)))
        (dun-replace dun-diggables dun-current-room nil))))
 
-(defun dun-climb (obj)
-  (let ((objnum (dun-objnum-from-args obj)))
-    (cond
-      ((not objnum)
-       (dun-mprincl "I don't know what that object is."))
-      ((and (not (eq objnum obj-special))
-            (not (member objnum (nth dun-current-room dun-room-objects)
-                         :test #'eql))
-            (not (member objnum (nth dun-current-room dun-room-silents)
-                         :test #'eql))
-            (not (and (member objnum dun-jar :test #'eql)
-                      (member obj-jar dun-inventory :test #'eql)))
-            (not (member objnum dun-inventory)))
-       (dun-mprincl "I don't see that here."))
-      ((and (eq objnum obj-special)
-            (not (member obj-tree (nth dun-current-room dun-room-silents)
-                         :test #'eql)))
-       (dun-mprincl "There is nothing here to climb."))
-      ((and (not (eq objnum obj-tree))
-            (not (eq objnum obj-special)))
-       (dun-mprincl "You can't climb that."))
-      (t
-       (dun-mprincl
-        "You manage to get about two feet up the tree and fall back down.  You
-notice that the tree is very unsteady.")))))
+(defun dun-climb (args)
+  (match args
+         (() (if (obj-in-room-p 'tree)
+                 (dun-climb '(tree))
+                 (format t "There is nothing here to climb.~%")))
+         ((obj . rest)
+          (princ
+           (cond
+             ((and (not (obj-in-room-p obj))
+                   (not (obj-in-inventory-p obj)))
+              "I don't see that here.")
+             ((not (eq obj 'tree))
+              "You can't climb that.")
+             (t "You manage to get about two feet up the tree but fall down. You
+notice that the tree is very unsteady.")))
+          (terpri))))
 
-(defun dun-eat (obj)
-  (let ((objnum (dun-objnum-from-args-std obj)))
-    (when objnum
-      (cond
-        ((not (member objnum dun-inventory))
-         (dun-mprincl "You don't have that."))
-        ((/= objnum obj-food)
-         (dun-mprinc "You forcefully shove ")
-         (dun-mprinc (string-downcase (cadr (nth objnum dun-objects))))
-         (dun-mprincl " down your throat, and start choking.")
-         (dun-die "choking"))
-        (t
-         (dun-mprincl "That tasted horrible.")
-         (dun-remove-obj-from-inven obj-food))))))
-
-(defun dun-put (args)
-  (let ((newargs (dun-firstwordl args)))
-    (if (not newargs)
-        (dun-mprincl "You must supply an object")
-        (let* ((obj (intern (string-upcase (car newargs))))
-               (objnum (cdr (assoc obj dun-objnames))))
+(defun dun-eat (args)
+  (match args
+         (() (format t "Eat what?~%"))
+         ((obj . rest)
           (cond
-            ((not objnum)
-             (dun-mprincl "I don't know what that object is."))
-            ((not (member objnum dun-inventory))
-             (dun-mprincl "You don't have that."))
-            (t (let ((newargs (dun-firstwordl (cdr newargs))))
-                 (if (not newargs)
-                     (dun-mprincl "You must supply an indirect object.")
-                     (let ((objnum2
-                            (cdr (assoc (intern (string-upcase (car newargs)))
-                                        dun-objnames))))
-                       (when (and (eql objnum2 obj-computer)
-                                  (= dun-current-room pc-area))
-                         (setq objnum2 obj-pc))
-                       (if (not objnum2)
-                           (dun-mprincl "I don't know what that indirect object is.")
-                           (if (and (not (member objnum2
-                                                 (nth dun-current-room dun-room-objects)
-                                                 :test #'eql))
-                                    (not (member objnum2
-                                                 (nth dun-current-room dun-room-silents)
-                                                 :test #'eql))
-                                    (not (member objnum2 dun-inventory
-                                                 :test #'eql)))
-                               (dun-mprincl "That indirect object is not here.")
-                               (dun-put-objs objnum objnum2))))))))))))
+            ((not (obj-in-inventory-p obj))
+             (format t "You don't have that.~%"))
+            ((eq obj 'food)
+             (format t "That tasted horrible.%")
+             (dun-remove-obj-from-inven obj-food))
+            (t (format t "You forcefully shove the ~(~A~) down your throat and start choking.~%"
+                       obj)
+               (dun-die "choking"))))))
 
 (defun dun-put-objs (obj1 obj2)
   (when (and (= obj2 obj-drop)
@@ -1580,7 +1571,7 @@ notice that the tree is very unsteady.")))))
       "As you put the CPU board in the computer, it immediately springs to life.
 The lights start flashing, and the fans seem to startup."))
     ((and (= obj1 obj-weight) (= obj2 obj-button))
-     (dun-drop '("weight")))
+     (dun-drop '(weight)))
     ((= obj2 obj-jar)                    ; Put something in jar
      (if (not (member obj1 (list obj-paper obj-diamond obj-emerald
                                  obj-license obj-coins obj-egg
@@ -1622,11 +1613,35 @@ with a bang.  The key seems to have vanished!")
      (dun-mprincl "You hear it plop down in some water below."))
     ((= obj2 obj-mail)
      (dun-mprincl "The mail chute is locked."))
-    ((member obj1 dun-inventory :test #'eql)
+    ((obj-in-inventory-p obj1)
      (dun-mprincl
       "I don't know how to combine those objects.  Perhaps you should
 just try dropping it."))
     (t (dun-mprincl "You can't put that there."))))
+
+(defun dun-put (args)
+  (match args
+         (() (format t "You must supply an object~%"))
+         ((obj)
+          (format t "You must supply an indirect object.~%"))
+         ((obj indirect . rest)
+          (destructuring-bind (objnum objnum2)
+              (mapcar #'obj->num (list obj indirect))
+            (cond
+              ((not objnum)
+               (format t "I don't know what that object is.~%"))
+              ((not (obj-in-inventory-p obj))
+               (format t "You don't have that.~%"))
+              (t (when (and (eql objnum2 obj-computer)
+                            (= dun-current-room pc-area))
+                   (setq objnum2 obj-pc))
+                 (cond
+                   ((not objnum2)
+                    (format t "I don't know what that indirect object is.~%"))
+                   ((and (not (obj-in-inventory-p objnum2))
+                         (not (obj-in-room-p objnum2)))
+                    (format t "That indirect object is not here.~%"))
+                   (t (dun-put-objs objnum objnum2)))))))))
 
 (defun dun-type (_args)
   (declare (ignore _args))
@@ -1645,9 +1660,8 @@ just try dropping it."))
 
 (defun dun-move (dir)
   (if (and (not (member dun-current-room dun-light-rooms :test #'eql))
-           (not (member obj-lamp dun-inventory :test #'eql))
-           (not (member obj-lamp (nth dun-current-room dun-room-objects)
-                        :test #'eql)))
+           (not (obj-in-inventory-p 'lamp))
+           (not (obj-in-room-p 'lamp)))
       (progn
         (dun-mprinc
          "You trip over a grue and fall into a pit and break every bone in your
@@ -1732,10 +1746,12 @@ body.")
   (dun-move 'out))
 
 (defun dun-go (args)
-  (if (or (not (car args))
-          (eq (dun-doverb dun-ignore dun-verblist (car args)
-                          (cdr (cdr args))) -1))
-      (dun-mprincl "I don't understand where you want me to go.")))
+  (doverb args
+          :error-handler
+          #'(lambda (verb)
+              (declare (ignore verb))
+              (format t "I don't understand where you want me to go.~%"))))
+
 ;;; Movement in this direction causes something special to happen if the
 ;;; right conditions exist.  It may be that you can't go this way unless
 ;;; you have a key, or a passage has been opened.
@@ -1748,7 +1764,7 @@ body.")
 
 (defun dun-special-move (dir)
   (if (= dun-current-room building-front)
-      (if (not (member obj-key dun-inventory))
+      (if (not (obj-in-inventory-p 'key))
           (dun-mprincl "You don't have a key that can open this door.")
           (setq dun-current-room old-building-hallway))
       (progn
@@ -1756,14 +1772,13 @@ body.")
             (let (combo)
               (dun-mprincl
                "You must type a 3 digit combination code to enter this room.")
-              (dun-mprinc "Enter it here: ")
-              (setq combo (dun-read-line))
+              (setq combo (input "Enter it here: "))
               (if (string= combo dun-combination)
                   (setq dun-current-room gamma-computing-center)
                   (dun-mprincl "Sorry, that combination is incorrect."))))
 
         (if (= dun-current-room bear-hangout)
-            (if (member obj-bear (nth bear-hangout dun-room-objects))
+            (if (obj-in-room-p 'bear)
                 (progn
                   (dun-mprinc
                    "The bear is very annoyed that you would be so presumptuous as to try
@@ -1786,20 +1801,20 @@ force throws you out.  The train speeds away.")
               (setq dun-current-room museum-station)))
 
         (if (= dun-current-room old-building-hallway)
-            (if (and (member obj-key dun-inventory)
+            (if (and (obj-in-inventory-p 'key)
                      (> dun-key-level 0))
                 (setq dun-current-room meadow)
                 (dun-mprincl "You don't have a key that can open this door.")))
 
         (if (and (= dun-current-room maze-button-room)
                  (= dir (dun-movement 'northwest)))
-            (if (member obj-weight (nth maze-button-room dun-room-objects))
+            (if (obj-in-room-p 'weight)
                 (setq dun-current-room 18)
                 (dun-mprincl "You can't go that way.")))
 
         (if (and (= dun-current-room maze-button-room)
                  (= dir (dun-movement 'up)))
-            (if (member obj-weight (nth maze-button-room dun-room-objects))
+            (if (obj-in-room-p 'weight)
                 (dun-mprincl "You can't go that way.")
                 (setq dun-current-room weight-room)))
 
@@ -1821,20 +1836,20 @@ engulf you, and you burn to death.")
                   (dun-die "burning"))))
 
         (when (= dun-current-room red-room)
-          (if (not (member obj-towel (nth red-room dun-room-objects)))
+          (if (not (obj-in-room-p 'towel))
               (setq dun-current-room long-n-s-hallway)
               (dun-mprincl "You can't go that way.")))
 
         (if (and (> dir (dun-movement 'down))
                  (> dun-current-room gamma-computing-center)
                  (< dun-current-room museum-lobby))
-            (if (not (member obj-bus (nth dun-current-room dun-room-objects)))
+            (if (not (obj-in-room-p 'bus))
                 (dun-mprincl "You can't go that way.")
                 (if (= dir (dun-movement 'in))
                     (if dun-inbus
                         (dun-mprincl
                          "You are already in the bus!")
-                        (if (member obj-license dun-inventory)
+                        (if (obj-in-inventory-p 'license)
                             (progn
                               (dun-mprincl
                                "You board the bus and get in the driver's seat.")
@@ -1876,33 +1891,31 @@ huge rocks sliding down from the ceiling, and blocking your way out.")
 
 (defun dun-long (_args)
   (declare (ignore _args))
-  (setq dun-mode "long"))
+  (setq dun-mode 'long))
 
-(defun dun-turn (obj)
-  (let (objnum direction)
-    (when (setq objnum (dun-objnum-from-args-std obj))
-      (if (not (or (member objnum (nth dun-current-room dun-room-objects))
-                   (member objnum (nth dun-current-room dun-room-silents))))
-          (dun-mprincl "I don't see that here.")
-          (if (not (= objnum obj-dial))
-              (dun-mprincl "You can't turn that.")
-              (progn
-                (setq direction (dun-firstword (cdr obj)))
-                (if (or (not direction)
-                        (not (or (string= direction "clockwise")
-                                 (string= direction "counterclockwise"))))
-                    (dun-mprincl "You must indicate clockwise or counterclockwise.")
-                    (progn
-                      (setq dun-sauna-level
-                            (if (string= direction "clockwise")
-                                (1+ dun-sauna-level)
-                                (1- dun-sauna-level)))
-                      (if (< dun-sauna-level 0)
-                          (progn
-                            (dun-mprincl
-                             "The dial will not turn further in that direction.")
-                            (setq dun-sauna-level 0))
-                          (dun-sauna-heat dun-sauna-level))))))))))
+(defun dun-turn (args)
+  (match args
+         (() (format t "What do you want to turn?~%"))
+         ((obj)
+          ;; at minimum, see if it's the dial and here... this will fail
+          (dun-turn (list obj nil)))
+         ((obj direction . rest)
+          (cond
+            ((not (obj-in-room-p obj))
+             (format t "I don't see that here.~%"))
+            ((not (eq obj 'dial))
+             (format t "You can't turn that.~%"))
+            ((not (member direction '(clockwise counterclockwise)))
+             (format t "You must indicate clockwise or counterclockwise.~%"))
+            (t (setq dun-sauna-level
+                     (case direction
+                       (clockwise (1+ dun-sauna-level))
+                       (counterclockwise (1- dun-sauna-level))))
+               (if (< dun-sauna-level 0)
+                   (progn
+                     (format t "The dial will not turn further in that direction.~%")
+                     (setq dun-sauna-level 0))
+                   (dun-sauna-heat dun-sauna-level)))))))
 
 (defun dun-sauna-heat (level)
   (cond
@@ -1915,14 +1928,12 @@ huge rocks sliding down from the ceiling, and blocking your way out.")
     ((= level 3)
      (dun-mprincl
       "It is now very hot.  There is something very refreshing about this.")
-     (when (or (member obj-rms dun-inventory :test #'eql)
-               (member obj-rms
-                       (nth dun-current-room dun-room-objects)
-                       :test #'eql))
+     (when (or (obj-in-inventory-p 'rms)
+               (obj-in-room-p 'rms))
        (dun-mprincl
         "You notice the wax on your statuette beginning to melt, until it completely
 melts off.  You are left with a beautiful diamond!")
-       (if (member obj-rms dun-inventory :test #'eql)
+       (if (obj-in-inventory-p 'rms)
            (progn
              (dun-remove-obj-from-inven obj-rms)
              (setq dun-inventory (append dun-inventory
@@ -1932,13 +1943,12 @@ melts off.  You are left with a beautiful diamond!")
              (dun-replace dun-room-objects dun-current-room
                           (append (nth dun-current-room dun-room-objects)
                                   (list obj-diamond))))))
-     (when (or (member obj-floppy dun-inventory :test #'eql)
-               (member obj-floppy (nth dun-current-room dun-room-objects)
-                       :test #'eql))
+     (when (or (obj-in-inventory-p 'floppy)
+               (obj-in-room-p 'floppy))
        (dun-mprincl
         "You notice your floppy disk beginning to melt.  As you grab for it, the
 disk bursts into flames, and disintegrates.")
-       (if (member obj-floppy dun-inventory :test #'eql)
+       (if (obj-in-inventory-p 'floppy)
            (dun-remove-obj-from-inven obj-floppy)
            (dun-remove-obj-from-room dun-current-room obj-floppy))))
 
@@ -1949,13 +1959,12 @@ disk bursts into flames, and disintegrates.")
 (defun dun-press (obj)
   (let ((objnum (dun-objnum-from-args-std obj)))
     (cond
-      ((not (or (member objnum (nth dun-current-room dun-room-objects)
-                        :test #'eql)
-                (member objnum (nth dun-current-room dun-room-silents)
-                        :test #'eql)))
+      ((not (obj-in-room-p objnum))
        (dun-mprincl "I don't see that here."))
-      ((not (member objnum (list obj-button obj-switch)))
-       (dun-mprincl "You can't " (car dun-line-list) " that."))
+      ((not (member objnum (list obj-button obj-switch)
+                    :test #'eql))
+       ;; TODO: previously showed the typed verb
+       (dun-mprincl "You can't " "press" " that."))
       ((= objnum obj-button)
        (dun-mprincl
         "As you press the button, you notice a passageway open up, but
@@ -1972,9 +1981,10 @@ as you release it, the passageway closes."))
 (defun dun-swim (_args)
   (declare (ignore _args))
   (cond
-    ((not (member dun-current-room (list lakefront-north lakefront-south)))
+    ((not (member dun-current-room (list lakefront-north lakefront-south)
+                  :test #'eql))
      (dun-mprincl "I see no water!"))
-    ((not (member obj-life dun-inventory))
+    ((not (obj-in-inventory-p 'life))
      (dun-mprincl
       "You dive in the water, and at first notice it is quite cold.  You then
 start to get used to it as you realize that you never really learned how
@@ -1992,8 +2002,8 @@ to swim.")
         (dun-mprincl "You have scored " total " out of a possible 90 points.")
         total)
       (progn
-        (dun-mprinc "You have scored " (dun-endgame-score))
-        (dun-mprincl " endgame points out of a possible 110.")
+        (format t "You have scored ~A endgame points out of a possible of 110.~%"
+                (dun-endgame-store))
         (when (= (dun-endgame-score) 110)
           (dun-mprincl)
           (dun-mprincl)
@@ -2083,19 +2093,17 @@ the ground, then putting some kind of treasure in it, and filling the hole
 with dirt again.  After this, you immediately wake up."))))
 
 (defun dun-break (obj)
-  (if (not (member obj-axe dun-inventory :test #'eql))
+  (if (not (obj-in-inventory-p 'axe))
       (dun-mprincl "You have nothing you can use to break things.")
       (let ((objnum (dun-objnum-from-args-std obj)))
         (when objnum
           (cond
-            ((member objnum dun-inventory)
+            ((obj-in-inventory-p objnum)
              (dun-mprincl
               "You take the object in your hands and swing the axe.  Unfortunately, you miss
 the object and slice off your hand.  You bleed to death.")
              (dun-die "an axe"))
-            ((not (or (member objnum (nth dun-current-room dun-room-objects))
-                      (member objnum
-                              (nth dun-current-room dun-room-silents))))
+            ((not (obj-in-room-p objnum))
              (dun-mprincl "I don't see that here."))
             ((= objnum obj-cable)
              (dun-mprincl
@@ -2106,7 +2114,7 @@ for a moment, then straighten yourself up.")
                           (append
                            (nth gamma-computing-center dun-room-objects)
                            dun-inventory))
-             (if (member obj-key dun-inventory :test #'eql)
+             (if (obj-in-inventory-p 'key)
                  (progn
                    (setq dun-inventory (list obj-key))
                    (dun-remove-obj-from-room gamma-computing-center obj-key))
@@ -2137,8 +2145,9 @@ for a moment, then straighten yourself up.")
     (setq total 0)
     (dolist (x (nth treasure-room dun-room-objects))
       (setq total (+ total (nth x dun-object-pts))))
-    (when (member obj-URINE (nth treasure-room dun-room-objects))
-      (setq total 0)) total))
+    (when (obj-in-room-p obj-URINE treasure-room)
+      (setq total 0))
+    total))
 
 (defun dun-endgame-score ()
   (let (total)
@@ -2167,7 +2176,7 @@ for a moment, then straighten yourself up.")
     (if (null questions)
         (progn
           (dun-mprincl "Your question is:")
-          (setq dun-correct-answer '("foo")))
+          (setq dun-correct-answer '(foo)))
         (let* ((which (random (length questions)))
                (question (nth which questions)))
           (dun-mprincl "Your question is:")
@@ -2189,60 +2198,44 @@ for a moment, then straighten yourself up.")
           (dun-dos-interface))))
 
 (defun dun-feed (args)
-  (let (objnum)
-    (when (setq objnum (dun-objnum-from-args-std args))
-      (if (and (= objnum obj-bear)
-               (member obj-bear (nth dun-current-room dun-room-objects)))
+  (let ((objnum (dun-objnum-from-args-std args)))
+    (when objnum
+      (if (and (= objnum obj-bear) (obj-in-room-p 'bear))
           (progn
-            (if (not (member obj-food dun-inventory))
+            (if (not (obj-in-inventory-p 'food))
                 (dun-mprincl "You have nothing with which to feed it.")
-                (dun-drop '("food"))))
-          (if (not (or (member objnum (nth dun-current-room dun-room-objects))
-                       (member objnum dun-inventory)
-                       (member objnum (nth dun-current-room dun-room-silents))))
+                (dun-drop '(food))))
+          (if (not (or (obj-in-room-p objnum)
+                       (obj-in-inventory-p objnum)))
               (dun-mprincl "I don't see that here.")
               (dun-mprincl "You cannot feed that."))))))
 
 ;;; Function which takes a verb and a list of other words.  Calls proper
 ;;; function associated with the verb, and passes along the other words.
 
-(defun dun-doverb (ignore verblist verb rest)
-  (when verb
-    (if (member (intern (string-upcase verb)) ignore)
-        (if (not (car rest))
-            -1
-            (dun-doverb ignore verblist (car rest) (cdr rest)))
-        (if (not (cdr (assoc (intern (string-upcase verb)) verblist)))
-            -1
-            (progn
-              (setq dun-numcmds (1+ dun-numcmds))
-              (funcall (cdr (assoc (intern (string-upcase verb)) verblist)) rest))))))
-
-;;; parse a line passed in as a string  Call the proper verb with the
-;;; rest of the line passed in as a list.
-
-(defun dun-vparse (ignore verblist line)
-  (setq dun-line-list (dun-listify-string line))
-  (dun-doverb ignore verblist (car dun-line-list) (cdr dun-line-list)))
-
-;;; Function which will get an object number given the list of
-;;; words in the command, except for the verb.
-
-(defun dun-objnum-from-args (obj)
-  (setq obj (dun-firstword obj))
-  (if (not obj)
-      obj-special
-      (cdr (assoc (intern (string-upcase obj)) dun-objnames))))
-
-(defun dun-objnum-from-args-std (obj)
-  (let (result)
-    (if (eq (setq result (dun-objnum-from-args obj)) obj-special)
-        (dun-mprincl "You must supply an object."))
-    (if (eq result nil)
-        (dun-mprincl "I don't know what that is."))
-    (if (eq result obj-special)
-        nil
-        result)))
+(defun doverb (words &key
+                       (verblist dun-verblist)
+                       (ignore ignored-words)
+                       (error-handler
+                        #'(lambda (verb)
+                            (declare (ignore verb))
+                            (format t "I don't understand that.~%"))))
+  ;; do nothing when words is nil
+  (when words
+    (let ((words (remove-if (lambda (word)
+                              (member word ignore))
+                            words)))
+      (if (not words)
+          ;; only ignored words were given
+          (funcall error-handler nil)
+          (destructuring-bind (verb . args) words
+            (let ((fcn (cdr (assoc verb verblist))))
+              (if fcn
+                  (progn
+                    ;; log number of commands run
+                    (incf dun-numcmds)
+                    (funcall fcn args))
+                  (funcall error-handler verb))))))))
 
 ;;; Function to put objects in the treasure room.  Also prints current
 ;;; score to let user know he has scored.
@@ -2338,28 +2331,28 @@ for a moment, then straighten yourself up.")
 ;;         (eval-buffer)
 ;;       (error (dun-mprincl "Invalid syntax.")))))
 
-(defun dun-login ()
-  (let (tries username password)
-    (setq tries 4)
-    (while (and (not dun-logged-in) (> (setq tries (- tries 1)) 0))
-      (dun-mprinc "\n\nUNIX System V, Release 2.2 (pokey)\n\nlogin: ")
-      (setq username (dun-read-line))
-      (dun-mprinc "password: ")
-      (setq password (dun-read-line))
+(defun dun-login (tries-left)
+  (when (and (not dun-logged-in)
+             (> tries-left 0))
+    (format t "~%~%UNIX System V, Release 2.2 (pokey)~%~%")
+    (let ((username (input "login: "))
+          (password (input "password: ")))
       (if (or (not (string= username "toukmond"))
               (not (string= password "robert")))
-          (dun-mprincl "login incorrect")
+          (progn
+            (format t "login incorrect~%")
+            (dun-login (1- tries-left)))
           (progn
             (setq dun-logged-in t)
-            (dun-mprincl "
-Welcome to Unix\n
+            (format t "
+Welcome to Unix~%
 Please clean up your directories.  The filesystem is getting full.
 Our tcp/ip link to gamma is a little flaky, but seems to work.
 The current version of ftp can only send files from your home
 directory, and deletes them after they are sent!  Be careful.
 
-Note: Restricted bourne shell in use.\n"))))
-    (setq dungeon-mode 'dungeon)))
+Note: Restricted bourne shell in use.~%")))))
+  (setq dungeon-mode 'dungeon))
 
 (defun dun-ls (args)
   (let ((ocdroom dun-cdroom))
@@ -2369,12 +2362,12 @@ Note: Restricted bourne shell in use.\n"))))
               (dun-ls nil))
           (setq dun-cdpath ocdpath)
           (setq dun-cdroom ocdroom))
-      (cond
-       ((= ocdroom -10) (dun-ls-inven))
-       ((= ocdroom -2) (dun-ls-rooms))
-       ((= ocdroom -3) (dun-ls-root))
-       ((= ocdroom -4) (dun-ls-usr))
-       ((> ocdroom 0) (dun-ls-room))))))
+        (cond
+          ((= ocdroom -10) (dun-ls-inven))
+          ((= ocdroom -2) (dun-ls-rooms))
+          ((= ocdroom -3) (dun-ls-root))
+          ((= ocdroom -4) (dun-ls-usr))
+          ((> ocdroom 0) (dun-ls-room))))))
 
 (defun dun-ls-root ()
   (dun-mprincl "total 4
@@ -2394,8 +2387,8 @@ drwxr-xr-x  3 toukmond restricted      512 Jan 1 1970 toukmond"))
 drwxr-xr-x  3 root     staff           512 Jan 1 1970 .
 drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
   (dolist (x dun-visited)
-    (dun-mprinc
-     "drwxr-xr-x  3 root     staff           512 Jan 1 1970 ")
+    (format t
+            "drwxr-xr-x  3 root     staff           512 Jan 1 1970 ")
     (dun-mprincl (nth x dun-room-shorts))))
 
 (defun dun-ls-room ()
@@ -2406,57 +2399,57 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..
   (dolist (x (nth dun-cdroom dun-room-objects))
     (if (and (>= x 0) (not (= x 255)))
         (progn
-          (dun-mprinc "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ")
+          (format t "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ")
           (dun-mprincl (nth x dun-objfiles))))))
 
 (defun dun-ls-inven ()
-  (dun-mprinc "total 467
+  (format t "total 467
 drwxr-xr-x  3 toukmond restricted      512 Jan 1 1970 .
 drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
   (dolist (x dun-unix-verbs)
     (if (not (eq (car x) 'IMPOSSIBLE))
         (progn
-          (dun-mprinc "
+          (format t "
 -rwxr-xr-x  1 toukmond restricted    10423 Jan 1 1970 ")
-          (dun-mprinc (car x)))))
+          (format t "~A" (car x)))))
   (dun-mprincl)
   (if (not dun-uncompressed)
       (dun-mprincl
        "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 paper.o.Z"))
   (dolist (x dun-inventory)
-    (dun-mprinc
-     "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ")
+    (format t
+            "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ")
     (dun-mprincl (nth x dun-objfiles))))
 
-(defun dun-echo (args)
-  (let (nomore var)
-    (setq nomore nil)
-    (dolist (x args)
-      (when (not nomore)
-        (if (not (string= (substring x 0 1) "$"))
-            (progn
-              (dun-mprinc x)
-              (dun-mprinc " "))
-            (progn
-              (setq var (intern (string-upcase (substring x 1))))
-              (if (not (boundp var))
-                  (dun-mprinc " ")
-                  (if (member var dun-restricted)
-                      (progn
-                        (dun-mprinc var)
-                        (dun-mprinc ": Permission denied")
-                        (setq nomore t))
-                      (progn
-                        (dun-mprinc var)
-                        (dun-mprinc " "))))))))
-    (dun-mprincl)))
+;; (defun dun-echo (args)
+;;   (let (nomore var)
+;;     (setq nomore nil)
+;;     (dolist (x args)
+;;       (when (not nomore)
+;;         (if (not (string= (substring x 0 1) "$"))
+;;             (progn
+;;               (dun-mprinc x)
+;;               (dun-mprinc " "))
+;;             (progn
+;;               (setq var (intern (string-upcase (substring x 1))))
+;;               (if (not (boundp var))
+;;                   (dun-mprinc " ")
+;;                   (if (member var dun-restricted)
+;;                       (progn
+;;                         (dun-mprinc var)
+;;                         (dun-mprinc ": Permission denied")
+;;                         (setq nomore t))
+;;                       (progn
+;;                         (dun-mprinc var)
+;;                         (dun-mprinc " "))))))))
+;;     (dun-mprincl)))
 
 (defun dun-ftp (args)
   (let (host username ident newlist)
     (if (not (car args))
         (dun-mprincl "ftp: hostname required on command line.")
         (progn
-          (setq host (intern (string-upcase (car args))))
+          (setq host (car args))
           (if (not (member host '(gamma dun-endgame)))
               (dun-mprincl "ftp: Unknown host.")
               (if (eq host 'dun-endgame)
@@ -2465,8 +2458,7 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
                       (dun-mprincl "ftp: host not responding.")
                       (progn
                         (dun-mprincl "Connected to gamma. FTP ver 0.9 00:00:00 01/01/70")
-                        (dun-mprinc "Username: ")
-                        (setq username (dun-read-line))
+                        (setq username (input "Username: "))
                         (if (string= username "toukmond")
                             (dun-mprincl "toukmond ftp access not allowed.")
                             (progn
@@ -2474,8 +2466,7 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
                                   (dun-mprincl
                                    "Guest login okay, send your user ident as password.")
                                   (dun-mprincl "Password required for " username))
-                              (dun-mprinc "Password: ")
-                              (setq ident (dun-read-line))
+                              (setq ident (input "Password: "))
                               (if (not (string= username "anonymous"))
                                   (dun-mprincl "Login failed.")
                                   (if (= (length ident) 0)
@@ -2491,29 +2482,23 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
 
 (defun dun-ftp-commands ()
   (setq dun-exitf nil)
-  (let (line)
-    (while (not dun-exitf)
-      (dun-mprinc "ftp> ")
-      (setq line (dun-read-line))
-      (when (eq
-             (dun-parse2 nil
-                         '((type . dun-ftptype) (binary . dun-bin) (bin . dun-bin)
-                           (send . dun-send) (put . dun-send) (quit . dun-ftpquit)
-                           (help . dun-ftphelp) (ascii . dun-fascii)) line)
-             -1)
-        (dun-mprincl "No such command.  Try help.")))
-    (setq dun-ftptype 'ascii)))
+  (while (not dun-exitf)
+    (doverb (input-list "ftp> " '(#\SPACE))
+            :verblist dun-ftp-verbs
+            :ignore nil
+            :error-handler
+            #'(lambda (word)
+                (declare (ignore word))
+                (format t "No such command. Try help."))))
+  (setq dun-ftptype 'ascii))
 
 (defun dun-ftptype (args)
-  (if (not (car args))
-      (dun-mprincl "Usage: type [binary | ascii]")
-      (progn
-        (setq args (intern (string-upcase (car args))))
-        (if (eq args 'binary)
-            (dun-bin nil)
-            (if (eq args 'ascii)
-                (dun-fascii '())
-                (dun-mprincl "Unknown type."))))))
+  (cond
+    ((equal args '(binary))
+     (dun-bin nil))
+    ((equal args '(ascii))
+     (dun-fascii nil))
+    (t (format t "Usage: type [binary | ascii]~%"))))
 
 (defun dun-bin (_args)
   (declare (ignore _args))
@@ -2530,59 +2515,51 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
   (setq dun-exitf t))
 
 (defun dun-send (args)
-  (if (not (car args))
-      (dun-mprincl "Usage: send <filename>")
-      (progn
-        (setq args (car args))
-        (let (counter foo)
-          (setq foo nil)
-          (setq counter 0)
+  (match args
+         ((filename)
+          (let (counter foo)
+            (setq foo nil)
+            (setq counter 0)
 
 ;;; User can send commands!  Stupid user.
 
-          (if (assoc (intern args) dun-unix-verbs)
-              (progn
-                (rplaca (assoc (intern args) dun-unix-verbs) 'IMPOSSIBLE)
-                (dun-mprinc "Sending ")
-                (dun-mprinc dun-ftptype)
-                (dun-mprinc " file for ")
-                (dun-mprincl args)
-                (dun-mprincl "Transfer complete."))
-              (progn
-                (dolist (x dun-objfiles)
-                  (if (string= args x)
-                      (progn
-                        (if (not (member counter dun-inventory))
-                            (progn
-                              (dun-mprincl "No such file.")
-                              (setq foo t))
-                            (progn
-                              (dun-mprinc "Sending ")
-                              (dun-mprinc dun-ftptype)
-                              (dun-mprinc " file for ")
-                              (dun-mprinc (string-downcase
-                                           (cadr (nth counter dun-objects))))
-                              (dun-mprincl ", (0 bytes)")
-                              (if (not (eq dun-ftptype 'binary))
-                                  (progn
-                                    (if (not (member obj-protoplasm
-                                                     (nth receiving-room
-                                                          dun-room-objects)))
-                                        (dun-replace dun-room-objects receiving-room
-                                                     (append (nth receiving-room
-                                                                  dun-room-objects)
-                                                             (list obj-protoplasm))))
-                                    (dun-remove-obj-from-inven counter))
-                                  (progn
-                                    (dun-remove-obj-from-inven counter)
-                                    (dun-replace dun-room-objects receiving-room
-                                                 (append (nth receiving-room dun-room-objects)
-                                                         (list counter)))))
-                              (setq foo t)
-                              (dun-mprincl "Transfer complete.")))))
-                  (setq counter (+ 1 counter)))
-                (if (not foo)
-                    (dun-mprincl "No such file."))))))))
+            (if (assoc filename dun-unix-verbs)
+                (progn
+                  (rplaca (assoc filename dun-unix-verbs) 'IMPOSSIBLE)
+                  (format t "Sending ~A file for ~A~%" dun-ftptype filename)
+                  (format t "Transfer complete.~%"))
+                (progn
+                  (dolist (x dun-objfiles)
+                    (if (eq filename x)
+                        (progn
+                          (if (not (member counter dun-inventory))
+                              (progn
+                                (dun-mprincl "No such file.")
+                                (setq foo t))
+                              (progn
+                                (format t "Sending ~A file for ~A, (0 bytes)~%"
+                                        dun-ftptype
+                                        (cadr (nth counter dun-objects)))
+                                (format t "Transfer complete.~%")
+                                (if (not (eq dun-ftptype 'binary))
+                                    (progn
+                                      (if (not (obj-in-room-p 'protoplasm receiving-room))
+                                          (dun-replace dun-room-objects receiving-room
+                                                       (append (nth receiving-room
+                                                                    dun-room-objects)
+                                                               (list obj-protoplasm))))
+                                      (dun-remove-obj-from-inven counter))
+                                    (progn
+                                      (dun-remove-obj-from-inven counter)
+                                      (dun-replace dun-room-objects receiving-room
+                                                   (append (nth receiving-room dun-room-objects)
+                                                           (list counter)))))
+                                (setq foo t)
+                                (dun-mprincl "Transfer complete.")))))
+                    (incf counter))
+                  (if (not foo)
+                      (dun-mprincl "No such file."))))))
+         (_ (format t "Usage: send <filename>~%"))))
 
 (defun dun-ftphelp (_args)
   (declare (ignore _args))
@@ -2627,10 +2604,9 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
                   (if (not dun-ethernet)
                       (dun-mprincl "Host not responding.")
                       (progn
-                        (dun-mprinc "Password: ")
-                        (setq passwd (dun-read-line))
+                        (setq passwd (input "Password: "))
                         (if (not (string= passwd "worms"))
-                            (dun-mprincl "\nlogin incorrect")
+                            (format t "~%login incorrect~%")
                             (progn
                               (dun-mprincl)
                               (dun-mprinc
@@ -2710,7 +2686,7 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
   (cond
     ((null (setq args (car args)))
      (dun-mprincl "Usage: cat <ascii-file-name>"))
-    ((string-match-p "/" args)
+    ((eq args '/)
      (dun-mprincl "cat: only files in current directory allowed."))
     ((and (> dun-cdroom 0) (string= args "description"))
      (dun-mprincl (car (nth dun-cdroom dun-rooms))))
@@ -2723,7 +2699,7 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
                    checklist)
            (dun-mprincl "Ascii files only.")
            (dun-mprincl "File not found."))))
-    ((assoc (intern args) dun-unix-verbs)
+    ((assoc args dun-unix-verbs)
      (dun-mprincl "Ascii files only."))
     (t (dun-mprincl "File not found."))))
 
@@ -2754,9 +2730,7 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
           (dun-dos-show-combination)
           (if (string= args "command.com")
               (dun-mprincl "Cannot type binary files")
-              (progn
-                (dun-mprinc "File not found - ")
-                (dun-mprincl (string-upcase args)))))
+              (format t "File not found - ~A~%" args)))
       (dun-mprincl "Must supply file name")))
 
 (defun dun-dos-invd (_args)
@@ -2784,15 +2758,10 @@ FOO      TXT        40 01-20-93   1:01a
 
 File not found")))
 
-
-(defun dun-dos-prompt ()
-  (dun-mprinc "A> "))
-
 (defun dun-dos-boot-msg ()
   (sleep 3)
-  (dun-mprincl "Current time is 00:00:00")
-  (dun-mprinc "Enter new time: ")
-  (dun-read-line))
+  (format t "Current time is 00:00:00~%")
+  (input "Enter new time: "))
 
 (defun dun-dos-spawn (_args)
   (declare (ignore _args))
@@ -2932,14 +2901,6 @@ File not found")))
 ;;         (dun-minsertl " saves: " dun-numsaves " commands: " dun-numcmds)
 ;;         (write-region 1 (point-max) dun-log-file nil 1)))))
 
-(defun dun-parse (ignore verblist line)
-  (setq dun-line-list (dun-listify-string line))
-  (dun-doverb ignore verblist (car dun-line-list) (cdr dun-line-list)))
-
-(defun dun-parse2 (ignore verblist line)
-  (setq dun-line-list (dun-listify-string2 line))
-  (dun-doverb ignore verblist (car dun-line-list) (cdr dun-line-list)))
-
 (defun main-loop ()
   (setq dun-dead nil)
   (setq dun-room 0)
@@ -2948,37 +2909,33 @@ File not found")))
       (when (not (= dun-room dun-current-room))
         (dun-describe-room dun-current-room)
         (setq dun-room dun-current-room))
-      (dun-mprinc ">")
-      (setq dun-line (string-downcase (dun-read-line)))
-      (when (eq (dun-vparse dun-ignore dun-verblist dun-line) -1)
-        (dun-mprincl "I don't understand that.")))))
+      (doverb (input-list ">")))))
 
 (defun dun-dos-interface ()
   (dun-dos-boot-msg)
   (setq dungeon-mode 'dos)
   (while (eq dungeon-mode 'dos)
-    (dun-dos-prompt)
-    (setq dun-line (string-downcase (dun-read-line)))
-    (when (eq (dun-parse2 nil dun-dos-verbs dun-line) -1)
-      (sleep 1)
-      (dun-mprincl "Bad command or file name")))
+    (doverb (input-list "A> " '(#\SPACE))
+            :ignore nil
+            :verblist dun-dos-verbs
+            :error-handler
+            #'(lambda (verb)
+                (declare (ignore verb))
+                (sleep 1)
+                (format t "Bad command or file name~%"))))
   (dun-mprincl))
 
 (defun dun-unix-interface ()
-  (dun-login)
+  (dun-login 4)
   (when dun-logged-in
     (setq dungeon-mode 'unix)
     (while (eq dungeon-mode 'unix)
-      (dun-mprinc "$ ")
-      (setq dun-line (string-downcase (dun-read-line)))
-      (if (eq (dun-parse2 nil dun-unix-verbs dun-line) -1)
-          (let ((esign (find #\= dun-line)))
-            (if esign
-                ;; (dun-doassign dun-line esign)
-                (error "not implemented")
-                (progn
-                  (dun-mprinc (car dun-line-list))
-                  (dun-mprincl ": not found."))))))
+      (doverb (input-list "$ " '(#\SPACE))
+              :ignore nil
+              :verblist dun-unix-verbs
+              :error-handler
+              #'(lambda (verb)
+                  (format t "~(~A~): not found.~%" verb))))
     (dun-mprincl)))
 
 (defun dungeon-nil (_arg)
