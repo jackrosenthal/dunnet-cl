@@ -1351,13 +1351,13 @@ disk bursts into flames, and disintegrates.")
          (format t "I don't see that here.~%"))
         ;; Shaking trees can be deadly
         ((= objnum obj-tree)
-         (dun-mprinc
+         (princ
           "You begin to shake a tree, and notice a coconut begin to fall from the air.
 As you try to get your hand up to block it, you feel the impact as it lands
 on your head.")
          (dun-die "a coconut"))
         ((= objnum obj-bear)
-         (dun-mprinc
+         (princ
           "As you go up to the bear, it removes your head and places it on the ground.")
          (dun-die "a bear"))
         ((< objnum 0) (dun-mprincl "You cannot shake that."))
@@ -1493,7 +1493,7 @@ For an explosive time, go to Fourth St. and Vermont.")
                        (format t "Taken.  ")
                        (when (and (= objnum obj-towel)
                                   (= dun-current-room red-room))
-                         (dun-mprinc
+                         (princ
                           "Taking the towel reveals a hole in the floor.")))))
                (dun-try-take objnum)))
        (dun-mprincl))))
@@ -1664,7 +1664,7 @@ just try dropping it."))
            (not (obj-in-inventory-p 'lamp))
            (not (obj-in-room-p 'lamp)))
       (progn
-        (dun-mprinc
+        (princ
          "You trip over a grue and fall into a pit and break every bone in your
 body.")
         (dun-die "a grue"))
@@ -1781,7 +1781,7 @@ body.")
         (if (= dun-current-room bear-hangout)
             (if (obj-in-room-p 'bear)
                 (progn
-                  (dun-mprinc
+                  (princ
                    "The bear is very annoyed that you would be so presumptuous as to try
 and walk right by it.  He tells you so by tearing your head off.
 ")
@@ -2604,7 +2604,7 @@ drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..~%")
                             (format t "~%login incorrect~%")
                             (progn
                               (dun-mprincl)
-                              (dun-mprinc
+                              (princ
                                "You begin to feel strange for a moment, and you lose your items.")
                               (dun-replace dun-room-objects computer-room
                                            (append (nth computer-room dun-room-objects)
