@@ -879,16 +879,12 @@ A hole leads north."
                 objnum
                 (format t "I don't know what that is.~%"))))))
 
+(defvar dun-inventory '(1))
+
 (defun obj-in-inventory-p (obj)
   (if (symbolp obj)
       (obj-in-inventory-p (obj->num obj))
       (member obj dun-inventory :test #'eql)))
-
-(defun obj-in-room-p (obj &optional (room dun-current-room))
-  (if (symbolp obj)
-      (obj-in-room-p (obj->num obj) room)
-      (or (member obj (nth room dun-room-objects) :test #'eql)
-          (member obj (nth room dun-room-silents) :test #'eql))))
 
 (defconstant obj-special 255)
 
@@ -1000,7 +996,12 @@ A hole leads north."
         nil nil nil nil nil nil nil nil
         (list obj-pc)                          ;; pc-area
         nil nil nil nil nil nil))
-(defvar dun-inventory '(1))
+
+(defun obj-in-room-p (obj &optional (room dun-current-room))
+  (if (symbolp obj)
+      (obj-in-room-p (obj->num obj) room)
+      (or (member obj (nth room dun-room-objects) :test #'eql)
+          (member obj (nth room dun-room-silents) :test #'eql))))
 
 ;;; Descriptions of objects, as they appear in the room description, and
 ;;; the inventory.
