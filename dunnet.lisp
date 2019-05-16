@@ -2371,56 +2371,50 @@ Note: Restricted bourne shell in use.~%")))))
           ((> ocdroom 0) (dun-ls-room))))))
 
 (defun dun-ls-root ()
-  (dun-mprincl "total 4
+  (format t "total 4
 drwxr-xr-x  3 root     staff           512 Jan 1 1970 .
 drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..
 drwxr-xr-x  3 root     staff          2048 Jan 1 1970 usr
-drwxr-xr-x  3 root     staff          2048 Jan 1 1970 rooms"))
+drwxr-xr-x  3 root     staff          2048 Jan 1 1970 rooms~%"))
 
 (defun dun-ls-usr ()
-  (dun-mprincl "total 4
+  (format t "total 4
 drwxr-xr-x  3 root     staff           512 Jan 1 1970 .
 drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..
-drwxr-xr-x  3 toukmond restricted      512 Jan 1 1970 toukmond"))
+drwxr-xr-x  3 toukmond restricted      512 Jan 1 1970 toukmond~%"))
 
 (defun dun-ls-rooms ()
-  (dun-mprincl "total 16
+  (format t "total 16
 drwxr-xr-x  3 root     staff           512 Jan 1 1970 .
-drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
+drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..~%")
   (dolist (x dun-visited)
     (format t
-            "drwxr-xr-x  3 root     staff           512 Jan 1 1970 ")
-    (dun-mprincl (nth x dun-room-shorts))))
+            "drwxr-xr-x  3 root     staff           512 Jan 1 1970 ~(~A~)~%"
+            (nth x dun-room-shorts))))
 
 (defun dun-ls-room ()
-  (dun-mprincl "total 4
+  (format t "total 4
 drwxr-xr-x  3 root     staff           512 Jan 1 1970 .
 drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..
--rwxr-xr-x  3 root     staff          2048 Jan 1 1970 description")
-  (dolist (x (nth dun-cdroom dun-room-objects))
-    (if (and (>= x 0) (not (= x 255)))
-        (progn
-          (format t "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ")
-          (dun-mprincl (nth x dun-objfiles))))))
+-rwxr-xr-x  3 root     staff          2048 Jan 1 1970 description~%")
+  (loop for x in (nth dun-cdroom dun-room-objects)
+     when (and (>= x 0) (not (= x 255)))
+     do (format t "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ~(~A~)~%"
+                (nth x dun-objfiles))))
 
 (defun dun-ls-inven ()
   (format t "total 467
 drwxr-xr-x  3 toukmond restricted      512 Jan 1 1970 .
-drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..")
-  (dolist (x dun-unix-verbs)
-    (if (not (eq (car x) 'IMPOSSIBLE))
-        (progn
-          (format t "
--rwxr-xr-x  1 toukmond restricted    10423 Jan 1 1970 ")
-          (format t "~A" (car x)))))
-  (dun-mprincl)
-  (if (not dun-uncompressed)
-      (dun-mprincl
-       "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 paper.o.Z"))
-  (dolist (x dun-inventory)
-    (format t
-            "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ")
-    (dun-mprincl (nth x dun-objfiles))))
+drwxr-xr-x  3 root     staff          2048 Jan 1 1970 ..~%")
+  (loop for x in dun-unix-verbs
+     when (not (eq (car x) 'impossible))
+     do (format t "-rwxr-xr-x  1 toukmond restricted    10423 Jan 1 1970 ~(~A~)~%"
+                (car x)))
+  (unless dun-uncompressed
+    (format t "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 paper.o.Z~%"))
+  (loop for x in dun-inventory
+     do (format t "-rwxr-xr-x  1 toukmond restricted        0 Jan 1 1970 ~(~A~)~%"
+                (nth x dun-objfiles))))
 
 ;; (defun dun-echo (args)
 ;;   (let (nomore var)
